@@ -1,8 +1,36 @@
+# The development stack: nginx in front of Rails, and nothing else.
+#
+# MySQL and Redis are NOT declared here. They run once for the whole machine in
+# ../dev-infra -- dev-db-mysql and dev-redis -- shared by every project on it,
+# the same way tyw, toggl, codalaxy and newsboard join them. One database
+# server for ten checkouts rather than ten servers, and no per-project volume
+# to forget about.
+#
+# Bring that stack up first:
+#
+#   cd ../dev-infra && docker compose up -d
+#
+# apps_local is created and owned THERE. external: true means this file joins
+# it and never creates or removes it -- if compose reports it as missing, the
+# shared stack is down, not misconfigured. This mirrors how
+# docker-compose-vps.yml joins vps_internal in production, so the two files
+# stay the same shape.
+networks:
+  apps_local:
+    external: true
+
 services:
   nginx:
     image: nginx:latest
+    networks:
+      - default
+      - apps_local
     ports:
-      - "8282:80"
+      # A variable because a second checkout -- a worktree, a review copy --
+      # runs its own copy of this stack beside the main one. Compose already
+      # namespaces containers by directory; only this host binding would
+      # collide. Set it in .env.
+      - "${HTTP_PORT:-8282}:80"
     depends_on:
       - rb
     volumes:
@@ -13,29 +41,23 @@ services:
   rb:
     image: brian978/ruby-rails:4.0-dev
     working_dir: /var/www/app
-    depends_on:
-      - db
-      - memcache
+    networks:
+      - default
+      - apps_local
     volumes:
       - ./app:/var/www/app:cached
     environment:
-      DB_HOST: db
+      # dev-db-mysql, not dev-db. Rails 8 generates utf8mb4_0900_ai_ci, which
+      # is MySQL 8 only -- against MariaDB the schema load fails on a collation
+      # it has never heard of.
+      DB_HOST: dev-db-mysql
       DB_USER: root
-      DB_PASSWORD: 12345
-
-  db:
-    image: mysql:8.4.9
-    ports:
-      - "33069:3306"
-    volumes:
-      - mysql-volume:/var/lib/mysql
-    environment:
-      MYSQL_DATABASE: app_devel
-      MYSQL_USER: root
-      MYSQL_ROOT_PASSWORD: 12345
-
-  memcache:
-    image: memcached:latest
-
-volumes:
-  mysql-volume:
+      DB_PASSWORD: dev12345
+      # Same variable production uses, so config/database.yml has one code path
+      # rather than an environment-specific branch. The shared server holds
+      # every project's database, so this name has to be the app's, not "app".
+      DB_NAME: "${APP_NAME:-app}"
+      # The cache. bin/setup points config.cache_store at this, because the
+      # generator runs with --skip-solid -- one shared Redis rather than three
+      # extra MySQL databases per app. Override to reach a different instance.
+      REDIS_HOST: "${REDIS_HOST:-dev-redis}"

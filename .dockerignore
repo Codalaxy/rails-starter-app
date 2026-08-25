@@ -1,0 +1,44 @@
+# The build context is the REPOSITORY ROOT (see build/app/Dockerfile), so this
+# file -- not app/.dockerignore -- governs what CI ships to the daemon.
+
+.git/
+.github/
+.claude/
+
+# Gems installed for the host's Ruby, often hundreds of MB. The image runs its
+# own `bundle install` against its own platform, so shipping these both bloats
+# the context and risks native extensions built for the wrong architecture
+# being picked up.
+app/vendor/bundle/
+
+app/.bundle/
+app/tmp/*
+app/log/*
+!app/tmp/.keep
+!app/log/.keep
+
+# Never ship secrets, or the key that decrypts them.
+.env
+.env.*
+!.env.tpl
+app/config/master.key
+app/config/credentials/*.key
+
+# The encrypted credentials file goes with them. Shipping it WITHOUT the key
+# that opens it makes Rails fail at boot with "AEAD authentication tag
+# verification failed", which reads like a corrupted secret rather than a file
+# that should not have been there. Keep this line unless the app actually reads
+# credentials at runtime -- in which case ship the file and supply
+# RAILS_MASTER_KEY, and never the key file itself.
+app/config/credentials.yml.enc
+
+# Development-only compose and local scratch.
+docker-compose.yml
+logs/
+app/storage/*
+!app/storage/.keep
+
+# Test artefacts and editor noise.
+app/test/
+**/.DS_Store
+**/node_modules/

@@ -1,0 +1,57 @@
+name: Deploy to Amazon ECR
+
+# All the work happens in aws-infra's reusable workflow. This file only says
+# which images to build and where they come from.
+#
+# There is deliberately no deploy script in this repository. Every app used to
+# carry its own copy; they drifted, so a fix in one never reached the others.
+# The logic now lives once, in Codalaxy/aws-infra. The trade-off is real: a
+# change there affects every app at once, so when a deploy breaks the cause may
+# be in aws-infra rather than in anything here.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Rebuild even if no deployment-relevant files changed
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  # Required for OIDC. A called workflow cannot grant itself more than the
+  # caller has, so this must be declared HERE -- the permissions block inside
+  # the reusable workflow is ignored when it is called. Without it the run
+  # fails at startup with no jobs and no log, which is the single most
+  # confusing way this can break.
+  id-token: write
+
+jobs:
+  deploy:
+    # Only on an actually merged PR, not one that was closed unmerged.
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
+    uses: Codalaxy/aws-infra/.github/workflows/deploy-app.yml@main
+    with:
+      # nginx is built FROM the app image so it serves exactly the assets that
+      # build produced. ORDER MATTERS: the first image becomes BASE_IMAGE for
+      # the ones after it.
+      images: |
+        app-latest:build/app/Dockerfile
+        nginx-latest:build/nginx/Dockerfile
+      # Which paths, when changed, are worth a rebuild. Everything the image or
+      # the instance-side deployment reads.
+      paths: app build deploy services .env.tpl docker-compose-vps.yml
+      force_rebuild: ${{ inputs.force_rebuild || false }}
+    secrets: inherit
+
+# A green tick here means the deploy was DISPATCHED, not that it succeeded: the
+# Lambda returns as soon as SSM accepts the command, and the instance-side
+# output (secrets, image pull, migrations) is in the SSM command history, not
+# in this log.
