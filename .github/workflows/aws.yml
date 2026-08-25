@@ -9,13 +9,21 @@ name: Deploy to Amazon ECR
 # change there affects every app at once, so when a deploy breaks the cause may
 # be in aws-infra rather than in anything here.
 
+# DISABLED. This template deploys nowhere -- there is no ECR repository and no
+# instance behind it, and a merge here should not push an image built from an
+# empty app/. The triggers are commented rather than deleted so that an app cut
+# from this template turns deployment on with one edit, against the reusable
+# workflow that is still maintained for the other projects.
+#
+# workflow_dispatch stays, so the file can be exercised by hand if someone
+# deliberately wants to build an image. Nothing fires on its own.
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-  pull_request:
-    types: [closed]
-    branches: [main]
+  # push:
+  #   tags:
+  #     - 'v[0-9]+.[0-9]+.[0-9]+'
+  # pull_request:
+  #   types: [closed]
+  #   branches: [main]
   workflow_dispatch:
     inputs:
       force_rebuild:

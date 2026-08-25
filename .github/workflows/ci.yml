@@ -6,10 +6,19 @@ name: CI
 # be pointed back down into app/. That is what the `defaults` block below and
 # setup-ruby's `working-directory` are for.
 
+# DISABLED. This is a template: `app/` is empty until someone runs bin/setup,
+# so every job here would fail on a missing Gemfile -- a red tick that means
+# nothing trains you to ignore red ticks.
+#
+# An app cut from this template turns it on by uncommenting the two triggers
+# below. That is the intended first edit, which is why they are commented
+# rather than deleted.
+#
+# workflow_dispatch stays so the suite can still be run here deliberately.
 on:
-  pull_request:
-  push:
-    branches: [ main ]
+  # pull_request:
+  # push:
+  #   branches: [ main ]
   workflow_dispatch:
 
 permissions:

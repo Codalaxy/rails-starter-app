@@ -86,6 +86,12 @@ See **[docs/deployment.md](docs/deployment.md)**. The short version: merging to
 `main` (or pushing a `vX.Y.Z` tag) builds two images, pushes them to ECR, and
 asks a Lambda to run the deployment on the instance over SSM.
 
+**Not in this repository, though.** All three workflows — `ci.yml`, `aws.yml`
+and `claude-code-review.yml` — have their triggers commented out, because a
+template has no app to test and nowhere to deploy. Each keeps
+`workflow_dispatch`, so uncommenting the triggers is the first edit an app cut
+from this template makes.
+
 Before the first deploy:
 
 1. Set `APP_NAME` on the instance side to match what you passed to `bin/setup` —
@@ -94,3 +100,4 @@ Before the first deploy:
 3. Confirm the instance runs Redis on the `vps_internal` network under the name
    `redis` — that is what `config.cache_store` defaults to. Every other app
    there uses the same one.
+4. Uncomment the triggers in `.github/workflows/aws.yml` and `ci.yml`.

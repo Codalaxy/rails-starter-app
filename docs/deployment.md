@@ -2,6 +2,14 @@
 
 What happens between merging a PR and the app running on the server.
 
+> **The workflows in this template are disabled.** `app/` is empty until
+> `bin/setup` runs, and there is no ECR repository or instance behind this
+> repository, so nothing should fire on a merge here. Every trigger in
+> `.github/workflows/` is commented out with `workflow_dispatch` left in place.
+> Turning deployment on in an app cut from this template is one edit —
+> uncomment the triggers in `aws.yml` and `ci.yml`. The rest of this page
+> describes what happens once you do.
+
 - [The path a deploy takes](#the-path-a-deploy-takes)
 - [Why there is no deploy script in this repo](#why-there-is-no-deploy-script-in-this-repo)
 - [What this repo provides](#what-this-repo-provides)

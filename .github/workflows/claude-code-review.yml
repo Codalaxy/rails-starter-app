@@ -11,11 +11,16 @@ name: Claude Code Review
 # job below no-ops with a notice until that secret exists, so a fresh repo does
 # not get a red X on every pull request in the meantime.
 
+# DISABLED alongside ci.yml and aws.yml. Review tokens and Actions minutes are
+# both metered, and there is little to review in a template whose app/ is empty.
+#
+# Uncomment the trigger below to turn it on, and note the deliberate absence of
+# `synchronize`: that would re-review on every push rather than once per PR.
+#
+# workflow_dispatch stays so a review can still be asked for by hand.
 on:
-  pull_request:
-    # Deliberately no `synchronize`: that would re-review on every push, and
-    # both Actions minutes and review tokens are metered.
-    types: [ opened, ready_for_review, reopened ]
+  # pull_request:
+  #   types: [ opened, ready_for_review, reopened ]
   workflow_dispatch:
 
 # A review of a superseded commit is wasted spend.
