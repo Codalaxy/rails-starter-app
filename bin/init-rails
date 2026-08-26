@@ -7,7 +7,22 @@ if [[ ! -e Gemfile ]]; then
   echo "Rails does not seem to be installed. Installing..."
 
   gem install rails -v 8.1.3
-  rails new . -d mysql
+
+  # --skip-solid: solid_cache, solid_queue and solid_cable each want their own
+  #   database, which on the SHARED MySQL server this app connects to means
+  #   three extra databases per app, created and migrated on every deploy, for
+  #   a cache the instance already provides. Redis runs beside MySQL in both
+  #   environments -- dev-redis in ../dev-infra, redis on vps_internal -- and
+  #   is what every other app here caches through. bin/setup wires it up.
+  #
+  # --skip-kamal: deployment is the shared SSM/ECR workflow in aws-infra, not
+  #   Kamal. The generated config/deploy.yml and .kamal/ describe a deployment
+  #   that will never run, and a stale one is worse than none.
+  #
+  # --skip-thruster: Thruster is an alternative to putting nginx in front of
+  #   Puma. There is an nginx in front of Puma -- in development and in the
+  #   production image -- and it already does asset caching and compression.
+  rails new . -d mysql --skip-solid --skip-kamal --skip-thruster
 fi
 
 rm -rfv .bundle .local .git

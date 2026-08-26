@@ -1,3 +1,17 @@
 .idea
+.DS_Store
 
 logs/nginx
+
+app/vendor/bundle
+app/log/*.log
+app/tmp
+
+# docker compose reads .env from THIS directory. app/.gitignore does not cover
+# the repository root, so without these lines a local override -- or anything
+# short-lived written into it -- is one `git add -A` from being committed.
+# .env.tpl and .env.example hold names only, never values.
+.env
+.env.*
+!.env.tpl
+!.env.example

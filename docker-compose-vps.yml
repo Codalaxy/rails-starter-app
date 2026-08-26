@@ -1,0 +1,88 @@
+# Production compose. Mirrors docker-compose.yml (development) but pulls built
+# images from ECR instead of mounting the source tree, and declares no database
+# of its own -- the instance runs one, shared by every app on it.
+#
+# APP_NAME, ECR_REGISTRY and ECR_REPOSITORY are exported by the deploy-app SSM
+# document before docker compose runs. Do not add defaults for them: a default
+# is how an app ends up deployed under the wrong name or pulling the wrong
+# repository without anything failing loudly.
+
+networks:
+  # vps_internal is created and owned OUTSIDE any app -- external: true means
+  # compose joins it and never creates or removes it. Every app on the instance
+  # shares it, which is how this one reaches the database, Redis, and the
+  # public internet.
+  #
+  # Never declare a project-scoped network here as well. A network compose owns
+  # is recreated per deploy, and once two exist with matching names compose
+  # refuses to start the app at all:
+  #
+  #   network <app>_host_network is ambiguous (2 matches found on name)
+  #
+  # That took a production site down twice in another repo before it was
+  # removed. One external network is enough.
+  vps_internal:
+    external: true
+
+services:
+  webserver:
+    container_name: ${APP_NAME}-nginx
+    image: ${ECR_REGISTRY}/${ECR_REPOSITORY}:nginx-latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_CONTAINER: ${APP_NAME}-app
+    networks:
+      - vps_internal
+    depends_on:
+      - app
+    volumes:
+      - ./services/nginx/conf.d/default.conf.vps.template:/etc/nginx/templates/default.conf.template
+
+  app: &app-base
+    container_name: ${APP_NAME}-app
+    image: ${ECR_REGISTRY}/${ECR_REPOSITORY}:app-latest
+    restart: unless-stopped
+    env_file:
+      # Written at deploy time from Secrets Manager, from the names listed in
+      # .env.tpl, and deleted once the containers are up.
+      - .env
+    environment:
+      # Ruby's default allocator creates a heap arena per thread, which on a
+      # small instance is memory the app never gives back. One or two arenas
+      # cost a little contention and save tens of MB.
+      - MALLOC_ARENA_MAX=2
+      # Puma threads. Rails defaults to 5; on a shared 1-2 core box each extra
+      # thread carries a resident heap for concurrency that may never arrive.
+      # Raise it when the app is actually the busy one on the instance.
+      - RAILS_MAX_THREADS=${RAILS_MAX_THREADS:-3}
+      # One variable, two readers: config.cache_store (see
+      # build/rails/cache_store.production.rb) and the generated
+      # config/cable.yml, which with --skip-solid falls back to the Redis
+      # adapter and would otherwise default to redis://localhost:6379/1 --
+      # nothing at all from inside the container.
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/1}
+    networks:
+      - vps_internal
+
+  # A background worker, if the app enqueues jobs. Left commented rather than
+  # deleted so the two things that are easy to get wrong are written down.
+  #
+  # worker:
+  #   <<: *app-base
+  #   container_name: ${APP_NAME}-worker
+  #   command: ./bin/jobs
+  #   # NOTE: a service's own `environment:` REPLACES the anchor's, it does not
+  #   # merge with it. Anything the app needs has to be repeated here.
+  #   environment:
+  #     - MALLOC_ARENA_MAX=2
+  #     # A worker serves no requests; one thread is all the queue loop uses.
+  #     - RAILS_MAX_THREADS=1
+  #     - REDIS_URL=${REDIS_URL:-redis://redis:6379/1}
+  #   # Capped so a long job cannot crowd the web container into swap. The first
+  #   # request after that happens waits on disk to fault Rails back in, which
+  #   # reads as a broken app rather than a memory problem.
+  #   mem_limit: 320m
+  #   depends_on:
+  #     - app

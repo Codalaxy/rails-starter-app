@@ -1,0 +1,68 @@
+name: Claude Code Review
+
+# Reviews a pull request when it opens and posts findings as inline comments.
+#
+# Requires one repository secret, CLAUDE_CODE_OAUTH_TOKEN, which ties runs to a
+# Claude subscription rather than a metered API key. Generate it by running
+#
+#   claude setup-token
+#
+# locally, then add it under Settings -> Secrets and variables -> Actions. The
+# job below no-ops with a notice until that secret exists, so a fresh repo does
+# not get a red X on every pull request in the meantime.
+
+# DISABLED alongside ci.yml and aws.yml. Review tokens and Actions minutes are
+# both metered, and there is little to review in a template whose app/ is empty.
+#
+# Uncomment the trigger below to turn it on, and note the deliberate absence of
+# `synchronize`: that would re-review on every push rather than once per PR.
+#
+# workflow_dispatch stays so a review can still be asked for by hand.
+on:
+  # pull_request:
+  #   types: [ opened, ready_for_review, reopened ]
+  workflow_dispatch:
+
+# A review of a superseded commit is wasted spend.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      # Required for the action's default GitHub App authentication.
+      id-token: write
+    env:
+      # `secrets` cannot be read from a job-level `if`, so the presence check
+      # becomes an env var the steps can test.
+      HAS_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+    steps:
+      - name: Report the missing token instead of failing
+        if: env.HAS_TOKEN != 'true'
+        run: echo "::notice::CLAUDE_CODE_OAUTH_TOKEN is not set -- skipping the review. Run 'claude setup-token' and add it as a repository secret to enable it."
+
+      - name: Checkout code
+        if: env.HAS_TOKEN == 'true'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Review
+        if: env.HAS_TOKEN == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
+          plugins: "code-review@claude-code-plugins"
+          # --comment posts each finding inline. Without it the review is
+          # written only to this job's log.
+          prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          # Required even though the skill's own frontmatter names the same
+          # tool: the action starts the inline-comment MCP server only when
+          # --allowedTools asks for it.
+          claude_args: '--allowedTools "mcp__github_inline_comment__create_inline_comment"'

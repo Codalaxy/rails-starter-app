@@ -1,16 +1,196 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# One-time bootstrap: generate the Rails app into app/, fix the generated config
+# that only breaks in a container or on a shared server, and start the stack.
+#
+# Four fixes, each commented where it happens: a container-ready database.yml,
+# a cache pointed at the shared Redis, an Action Cable channel prefix that is
+# not the same string in every app, and the redis gem the generator omits.
+#
+# Safe to re-run. Nothing here overwrites work: the Rails generator is skipped
+# once a Gemfile exists, database.yml is only installed while it is still the
+# generated one, the cache store is left alone once wired, and .env is only
+# written when absent.
+set -euo pipefail
 
-docker run --name rails-setup \
-  --mount type=bind,src=./bin/init-rails,dst=/usr/local/init-rails \
-  --mount type=bind,src=./app,dst=/var/www/app \
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+# The app name is used for the database, the Secrets Manager namespace and the
+# production container names, so it has to be a single stable token rather than
+# whatever the checkout directory happens to be called. Derived from the
+# directory, overridable, and normalised either way.
+APP_NAME="${APP_NAME:-${1:-$(basename "$root")}}"
+APP_NAME="$(printf '%s' "$APP_NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '_' | sed 's/^_//; s/_$//')"
+
+if [[ -z "$APP_NAME" ]]; then
+  echo "Could not derive an app name. Run: APP_NAME=myapp bin/setup" >&2
+  exit 1
+fi
+
+echo "==> app name: $APP_NAME"
+
+# MySQL and Redis are shared with every other project on this machine and live
+# in ../dev-infra. Checked before anything else because the generator takes
+# minutes and the stack cannot come up without them.
+if ! docker network inspect apps_local >/dev/null 2>&1; then
+  echo "The shared dev stack is not running. Start it first:" >&2
+  echo "  cd ../dev-infra && docker compose up -d" >&2
+  exit 1
+fi
+
+# --------------------------------------------------------------- rails new
+
+# Absolute paths: a relative --mount source is resolved by the daemon, not the
+# shell, so it only works by accident and not on every Docker version.
+echo "==> generating the Rails app (skipped if app/Gemfile exists)"
+docker run --rm --name rails-setup \
+  --mount "type=bind,src=$root/bin/init-rails,dst=/usr/local/init-rails" \
+  --mount "type=bind,src=$root/app,dst=/var/www/app" \
   --entrypoint "/usr/local/init-rails" \
   --workdir /var/www/app \
   brian978/ruby-rails:4.0-dev
 
-docker rm rails-setup
+# ------------------------------------------------------------- database.yml
 
-sed -i '' '/default: &default/,/^\s*$/ s/username:.*$/username: <%= ENV["DB_USER"] %>/' app/config/database.yml
-sed -i '' '/default: &default/,/^\s*$/ s/password:.*$/password: <%= ENV["DB_PASSWORD"] %>/' app/config/database.yml
-sed -i '' '/default: &default/,/^\s*$/ s/host:.*$/host: <%= ENV["DB_HOST"] %>/' app/config/database.yml
+# Replaced wholesale rather than patched with sed. The old version rewrote
+# username/password/host inside the `default: &default` block only, which left
+# the generated production block hardcoding `username: app` and ignoring
+# DB_HOST -- so the app worked locally and, in production, looked for a MySQL
+# socket that does not exist inside the container. That is a failure you only
+# ever see after a deploy. It also used `sed -i ''`, which is BSD syntax and
+# errors on Linux.
+if [[ -f app/config/database.yml ]] && grep -q 'username: app' app/config/database.yml; then
+  echo "==> installing container-ready config/database.yml"
+  sed "s/__APP_NAME__/$APP_NAME/g" build/rails/database.yml > app/config/database.yml
+elif [[ -f app/config/database.yml ]]; then
+  echo "==> config/database.yml already customised, leaving it alone"
+fi
 
-make build start
+# ---------------------------------------------------------------- cache
+
+# Redis, not solid_cache. The generator runs with --skip-solid (see
+# bin/init-rails), so without this Rails falls back to a per-process memory
+# store in development and a file store in production -- neither of which is
+# shared between the web container and anything else.
+#
+# The snippet is READ IN after `Rails.application.configure do` rather than
+# appended: cache_store has to be set INSIDE that block, and appending to the
+# end of the file would put it outside, where it does nothing. `sed r` is POSIX
+# and behaves identically on both platforms, unlike in-place sed.
+MARKER="cache store -- managed by bin/setup"
+
+insert_after_configure() {
+  local file="$1" snippet="$2"
+
+  [[ -f "$file" ]] || return 0
+
+  # Our own marker, not the words "cache_store". The generated production.rb
+  # carries a COMMENTED `# config.cache_store = :mem_cache_store`, so a match on
+  # the bare name skipped the insertion and left production on the default
+  # in-memory store -- silently, which is the one outcome this whole function
+  # exists to avoid.
+  if grep -qF "$MARKER" "$file"; then
+    echo "    $file already wired, leaving it alone"
+    return 0
+  fi
+
+  # An ACTIVE setting, ignoring comments. Development ships one
+  # (`config.cache_store = :memory_store`, per-process); production does not.
+  local active
+  active=$(grep -nE '^[[:space:]]*config\.cache_store' "$file" || true)
+
+  if [[ -n "$active" ]] && ! grep -qE '^[[:space:]]*config\.cache_store = :(memory|mem_cache|file|null)_store[[:space:]]*$' "$file"; then
+    echo "    $file sets its own cache store already -- leaving it alone." >&2
+    echo "    Point it at Redis by hand if that was not deliberate: $snippet" >&2
+    return 0
+  fi
+
+  # Drop the generated default so there is exactly one setting, then read the
+  # snippet in after the configure block. It has to go INSIDE that block;
+  # appending to the end of the file would put it outside, where it does
+  # nothing.
+  #
+  # -E, not plain sed: BSD sed has no `\|` alternation in basic expressions, so
+  # the delete below silently did nothing on macOS and development ended up
+  # with TWO cache_store lines -- the generated :memory_store last, which is
+  # the one Ruby would keep. Both platforms support -E.
+  sed -E -e '/^[[:space:]]*config\.cache_store = :(memory|mem_cache|file|null)_store[[:space:]]*$/d' \
+         -e "/^Rails\.application\.configure do$/r $snippet" \
+         "$file" > "$file.tmp"
+
+  # The anchor is generated by Rails and has been stable for years, but a
+  # silent miss would leave the app on a default store with nothing to say so.
+  if ! grep -qF "$MARKER" "$file.tmp"; then
+    rm -f "$file.tmp"
+    echo "Could not find the configure block in $file." >&2
+    echo "Set config.cache_store by hand -- see $snippet" >&2
+    return 1
+  fi
+
+  # Exactly one active setting, or the last one in the file wins and it may not
+  # be ours. This assertion is here because that is precisely what happened.
+  local count
+  count=$(grep -cE '^[[:space:]]*config\.cache_store' "$file.tmp" || true)
+  if [[ "$count" -ne 1 ]]; then
+    rm -f "$file.tmp"
+    echo "$file would end up with $count active cache_store settings, not 1." >&2
+    echo "Left unchanged -- set it by hand, see $snippet" >&2
+    return 1
+  fi
+
+  mv "$file.tmp" "$file"
+  echo "    $file"
+}
+
+echo "==> pointing the cache at Redis"
+insert_after_configure app/config/environments/development.rb build/rails/cache_store.development.rb
+insert_after_configure app/config/environments/production.rb  build/rails/cache_store.production.rb
+
+# --skip-solid leaves config/cable.yml behind, pointing the production adapter
+# at Redis with a channel_prefix taken from the generated app name -- which is
+# always "app", because the generator runs in /var/www/app. Every project on
+# this machine shares one Redis, so two apps that both adopt Action Cable would
+# otherwise publish into the same channel namespace and hear each other.
+if [[ -f app/config/cable.yml ]] && grep -q "channel_prefix: app_production" app/config/cable.yml; then
+  echo "==> namespacing the Action Cable channel prefix"
+  sed -e "s/channel_prefix: app_production/channel_prefix: ${APP_NAME}_production/" \
+    app/config/cable.yml > app/config/cable.yml.tmp && mv app/config/cable.yml.tmp app/config/cable.yml
+fi
+
+# --skip-solid removes the cache gems without adding a replacement.
+if [[ -f app/Gemfile ]] && ! grep -q '^gem "redis"' app/Gemfile; then
+  echo "==> adding the redis gem"
+  cat >> app/Gemfile <<'GEMFILE'
+
+# Redis-backed cache. Shared with every other app -- dev-redis in ../dev-infra,
+# redis on vps_internal -- so it needs no database of its own and no migrations.
+gem "redis", "~> 6.0"
+GEMFILE
+fi
+
+# --------------------------------------------------------------------- .env
+
+# docker compose reads .env from the repository ROOT. It is gitignored -- see
+# .env.example for the knobs, and .env.tpl for what production fetches from
+# Secrets Manager.
+if [[ ! -f .env ]]; then
+  echo "==> writing .env"
+  {
+    echo "APP_NAME=$APP_NAME"
+    echo "HTTP_PORT=8282"
+  } > .env
+fi
+
+echo "==> starting the stack"
+make up
+
+cat <<NEXT
+
+Next, inside the app container:
+
+  make bundle     install gems
+  make migrate    create ${APP_NAME}_development on the shared server and migrate
+
+The database server is shared (../dev-infra) and creates nothing on its own, so
+that second step is what brings this app's schema into existence.
+NEXT

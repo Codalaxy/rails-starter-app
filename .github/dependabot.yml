@@ -1,0 +1,25 @@
+version: 2
+updates:
+# The Gemfile is in app/, not at the repository root where Dependabot looks by
+# default -- pointing bundler at "/" here would find nothing to update.
+- package-ecosystem: bundler
+  directory: "/app"
+  schedule:
+    interval: weekly
+  open-pull-requests-limit: 10
+  # One PR for the whole week's gems rather than one per gem. update-types is
+  # spelled out so majors are grouped too, not left to the default.
+  groups:
+    gems:
+      patterns: [ "*" ]
+      update-types: [ "major", "minor", "patch" ]
+# Workflows, by contrast, are only ever read from the root .github/workflows.
+- package-ecosystem: github-actions
+  directory: "/"
+  schedule:
+    interval: weekly
+  open-pull-requests-limit: 10
+  groups:
+    actions:
+      patterns: [ "*" ]
+      update-types: [ "major", "minor", "patch" ]

@@ -1,0 +1,144 @@
+name: CI
+
+# The Rails app is not the repository root -- it lives in app/, alongside
+# build/, deploy/ and services/. GitHub only reads workflows from the ROOT
+# .github/workflows, so this file lives here while every command it runs has to
+# be pointed back down into app/. That is what the `defaults` block below and
+# setup-ruby's `working-directory` are for.
+
+# DISABLED. This is a template: `app/` is empty until someone runs bin/setup,
+# so every job here would fail on a missing Gemfile -- a red tick that means
+# nothing trains you to ignore red ticks.
+#
+# An app cut from this template turns it on by uncommenting the two triggers
+# below. That is the intended first edit, which is why they are commented
+# rather than deleted.
+#
+# workflow_dispatch stays so the suite can still be run here deliberately.
+on:
+  # pull_request:
+  # push:
+  #   branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A second push to the same branch makes the first run's answer worthless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    working-directory: app
+
+jobs:
+  scan_ruby:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: app
+          bundler-cache: true
+
+      - name: Scan for common Rails security vulnerabilities using static analysis
+        run: bin/brakeman --no-pager
+
+      - name: Scan for known security vulnerabilities in gems used
+        run: bin/bundler-audit
+
+  scan_js:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: app
+          bundler-cache: true
+
+      - name: Scan for security vulnerabilities in JavaScript dependencies
+        run: bin/importmap audit
+
+  lint:
+    runs-on: ubuntu-latest
+    env:
+      RUBOCOP_CACHE_ROOT: tmp/rubocop
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: app
+          bundler-cache: true
+
+      - name: Prepare RuboCop cache
+        uses: actions/cache@v6
+        env:
+          DEPENDENCIES_HASH: ${{ hashFiles('app/.ruby-version', 'app/**/.rubocop.yml', 'app/**/.rubocop_todo.yml', 'app/Gemfile.lock') }}
+        with:
+          # Actions resolve against the repository root regardless of the
+          # `defaults` above, so the cache path carries the app/ prefix that
+          # RUBOCOP_CACHE_ROOT -- read by RuboCop itself, in app/ -- must not.
+          path: app/${{ env.RUBOCOP_CACHE_ROOT }}
+          key: rubocop-${{ runner.os }}-${{ env.DEPENDENCIES_HASH }}-${{ github.ref_name == github.event.repository.default_branch && github.run_id || 'default' }}
+          restore-keys: |
+            rubocop-${{ runner.os }}-${{ env.DEPENDENCIES_HASH }}-
+
+      - name: Lint code for consistent style
+        run: bin/rubocop -f github
+
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        # CI gets its own database because there is no shared instance on a
+        # runner. Pinned to the major the shared dev server runs (../dev-infra,
+        # currently 8.0.x) -- testing against a newer server than development
+        # and production use turns a green run into a weaker claim than it
+        # looks. The bare `mysql` tag floats to the newest major, which would
+        # break CI on a commit that changed nothing.
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: true
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
+    steps:
+      # Checkout comes FIRST: `defaults` above puts every `run` step in app/,
+      # and that directory does not exist until the repository is on disk.
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y default-libmysqlclient-dev libvips
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: app
+          bundler-cache: true
+
+      - name: Run tests
+        env:
+          RAILS_ENV: test
+          # config/database.yml builds the connection from DB_USER/DB_PASSWORD/
+          # DB_HOST, so feed it those rather than a DATABASE_URL: the URL would
+          # override only the host and leave username at its default, which does
+          # not exist on the service container. Empty DB_PASSWORD matches
+          # MYSQL_ALLOW_EMPTY_PASSWORD above.
+          DB_HOST: 127.0.0.1
+          DB_USER: root
+          DB_PASSWORD: ""
+        run: bin/rails db:test:prepare test
